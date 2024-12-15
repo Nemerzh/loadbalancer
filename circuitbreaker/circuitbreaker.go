@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"loadbalancer/models"
+	"log"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 )
@@ -16,56 +16,60 @@ type ConfigService interface {
 	Subscribe() <-chan models.Config
 }
 
-type CircuitBreaker struct {
-	config           models.Config
-	configService    ConfigService
-	healthCheck      func(server string) error
-	availableServers map[string]bool
-	m                sync.RWMutex
-	parentCtx        context.Context
+type serverState struct {
+	isAlive   bool
+	err       error
+	checkedAt time.Time
 }
 
-func NewCircuitBreaker(ctx context.Context, config models.Config, configService ConfigService) *CircuitBreaker {
+type CircuitBreaker struct {
+	config               models.Config
+	configLock           sync.RWMutex
+	configService        ConfigService
+	availableServers     map[string]serverState
+	availableServersLock sync.RWMutex
+	parentCtx            context.Context
+	client               *http.Client
+}
+
+func NewCircuitBreaker(ctx context.Context, configService ConfigService) *CircuitBreaker {
 	cb := &CircuitBreaker{
-		config:           config,
+		config:           models.Config{},
 		configService:    configService,
-		availableServers: make(map[string]bool),
+		availableServers: make(map[string]serverState),
 		parentCtx:        ctx,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 	}
 
-	cb.healthCheck = cb.defaultHealthCheck
 	go cb.runHealthCheck(ctx)
 	go cb.reloadConfig(ctx)
+
 	return cb
 }
 
-func (cb *CircuitBreaker) defaultHealthCheck(serverID string) error {
-	cb.m.RLock()
-	defer cb.m.RUnlock()
-
-	for _, group := range cb.config.TargetGroups {
-		for _, server := range group.Servers {
-			if server.ID == serverID {
-				serverURL := fmt.Sprintf("http://%s:%d%s", server.Host, server.Port, server.HealthCheck)
-				if _, err := url.Parse(serverURL); err != nil {
-					return fmt.Errorf("invalid URL: %w", err)
-				}
-				req, err := http.NewRequestWithContext(cb.parentCtx, http.MethodGet, serverURL, nil)
-				if err != nil {
-					return fmt.Errorf("failed to create request: %w", err)
-				}
-				resp, err := http.DefaultClient.Do(req)
-				if err != nil {
-					return fmt.Errorf("request failed: %w", err)
-				}
-				if resp.StatusCode != http.StatusOK {
-					return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-				}
-				return nil
-			}
-		}
+func (cb *CircuitBreaker) defaultHealthCheck(serverHealthcheckURL string) error {
+	req, err := http.NewRequestWithContext(cb.parentCtx, http.MethodGet, serverHealthcheckURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
 	}
-	return fmt.Errorf("server ID not found")
+
+	resp, err := cb.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+
+	err = resp.Body.Close()
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	return nil
 }
 
 func (cb *CircuitBreaker) reloadConfig(ctx context.Context) {
@@ -75,41 +79,45 @@ func (cb *CircuitBreaker) reloadConfig(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case newConfig := <-configChan:
-			cb.m.Lock()
+			cb.availableServersLock.Lock()
+			cb.availableServers = cb.CheckServers(newConfig.TargetGroups)
+			cb.availableServersLock.Unlock()
+
+			cb.configLock.Lock()
 			cb.config = newConfig
-			cb.availableServers = cb.CheckServers()
-			cb.m.Unlock()
+			cb.configLock.Unlock()
 		}
 	}
 }
 
-func (cb *CircuitBreaker) IsServerAlive(server string) (bool, error) {
-	err := cb.healthCheck(server)
-	if err == nil {
-		return true, nil
+func (cb *CircuitBreaker) getServerState(serverHealthcheck string) serverState {
+	err := cb.defaultHealthCheck(serverHealthcheck)
+	log.Printf("got err %+v for %s ", err, serverHealthcheck)
+
+	return serverState{
+		isAlive:   err == nil,
+		err:       err,
+		checkedAt: time.Now(),
 	}
-	return false, err
 }
 
-func (cb *CircuitBreaker) CheckServers() map[string]bool {
-	cb.m.RLock()
-	defer cb.m.RUnlock()
-
-	results := make(map[string]bool)
-	for _, group := range cb.config.TargetGroups {
+func (cb *CircuitBreaker) CheckServers(groups []models.TargetGroup) map[string]serverState {
+	results := make(map[string]serverState)
+	for _, group := range groups {
 		for _, server := range group.Servers {
-			if server.Available {
-				if isAlive, err := cb.IsServerAlive(server.ID); err == nil && isAlive {
-					results[server.ID] = true
-				}
+			if !server.Available {
+				continue
 			}
+
+			results[server.ID] = cb.getServerState(server.GetFullHealthCheck())
 		}
 	}
+
 	return results
 }
 
 func (cb *CircuitBreaker) runHealthCheck(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -117,27 +125,35 @@ func (cb *CircuitBreaker) runHealthCheck(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cb.m.Lock()
-			cb.availableServers = cb.CheckServers()
-			cb.m.Unlock()
+			cb.configLock.RLock()
+			groups := cb.config.TargetGroups
+			cb.configLock.RUnlock()
+
+			cb.availableServersLock.Lock()
+			cb.availableServers = cb.CheckServers(groups)
+			cb.availableServersLock.Unlock()
 		}
 	}
 }
 
 func (cb *CircuitBreaker) GetAvailableServersInGroup(targetGroupID string) []string {
-	cb.m.RLock()
-	defer cb.m.RUnlock()
+	cb.availableServersLock.RLock()
+	defer cb.availableServersLock.RUnlock()
 
 	var servers []string
 	for _, group := range cb.config.TargetGroups {
-		if group.ID == targetGroupID {
-			for _, server := range group.Servers {
-				if isAlive, ok := cb.availableServers[server.ID]; ok && isAlive {
-					servers = append(servers, server.ID)
-				}
-			}
-			break
+		if group.ID != targetGroupID {
+			continue
 		}
+
+		for _, server := range group.Servers {
+			if state := cb.availableServers[server.ID]; state.isAlive {
+				servers = append(servers, server.ID)
+			}
+		}
+
+		return servers
 	}
+
 	return servers
 }

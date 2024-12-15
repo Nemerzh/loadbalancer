@@ -13,35 +13,39 @@ import (
 	"time"
 )
 
-type ConfigService struct {
-	apiURL      url.URL
-	config      atomic.Value
-	subscribers []chan models.Config
-	mu          sync.RWMutex
+type Service struct {
+	apiURL          url.URL
+	config          atomic.Value
+	subscribers     []chan models.Config
+	subscribersLock sync.RWMutex
+	client          *http.Client
 }
 
-// NewConfigService initializes and returns a new ConfigService
-func NewConfigService(apiURL url.URL) *ConfigService {
-	service := &ConfigService{
+// NewService initializes and returns a new Service
+func NewService(apiURL url.URL) *Service {
+	service := &Service{
 		apiURL:      apiURL,
 		subscribers: make([]chan models.Config, 0),
+		client:      &http.Client{Timeout: 30 * time.Second},
 	}
+
 	service.config.Store(models.Config{}) // Store initial empty config
+
 	return service
 }
 
 // LoadConfig fetches the configuration from the API
-func (c *ConfigService) LoadConfig(ctx context.Context) (models.Config, error) {
-	client := &http.Client{}
+func (c *Service) LoadConfig(ctx context.Context) (models.Config, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.apiURL.String(), nil)
 	if err != nil {
 		return models.Config{}, err
 	}
 
-	resp, err := client.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return models.Config{}, err
 	}
+
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -65,10 +69,10 @@ var (
 	ErrMissingTargetGroup        = errors.New("route references a non-existent target group")
 )
 
-func (c *ConfigService) ValidateConfig(cfg models.Config) error {
+func (c *Service) ValidateConfig(cfg models.Config) error {
 	// Validate balancing configuration
 	switch cfg.Balancing.Algorithm {
-	case models.RoundRobin.String(), models.LeastConnection.String(), models.Weighted.String():
+	case models.RoundRobin.String(), models.LeastConnection.String(), models.Weighted.String(), models.Random.String():
 	default:
 		return ErrInvalidBalancingAlgorithm
 	}
@@ -89,6 +93,11 @@ func (c *ConfigService) ValidateConfig(cfg models.Config) error {
 		for _, server := range tg.Servers {
 			if server.ID == "" || server.Name == "" || server.Host == "" || server.Port <= 0 {
 				return ErrInvalidServer
+			}
+
+			serverURL := server.GetFullHealthCheck()
+			if _, err := url.Parse(serverURL); err != nil {
+				return fmt.Errorf("invalid server healthcheck URL: %s: %w", err, ErrInvalidServer)
 			}
 		}
 	}
@@ -111,13 +120,13 @@ func (c *ConfigService) ValidateConfig(cfg models.Config) error {
 }
 
 // ReloadConfig fetches, validates, and updates the configuration
-func (c *ConfigService) ReloadConfig(ctx context.Context) error {
+func (c *Service) ReloadConfig(ctx context.Context) error {
 	newConfig, err := c.LoadConfig(ctx)
 	if err != nil {
 		// Log or handle invalid config without updating
 		return err
 	}
-	if err := c.ValidateConfig(newConfig); err != nil {
+	if err = c.ValidateConfig(newConfig); err != nil {
 		// Log or handle invalid config without updating
 		return err
 	}
@@ -128,7 +137,7 @@ func (c *ConfigService) ReloadConfig(ctx context.Context) error {
 }
 
 // GetConfig returns the current configuration safely
-func (c *ConfigService) GetConfig() (models.Config, error) {
+func (c *Service) GetConfig() (models.Config, error) {
 	config, ok := c.config.Load().(models.Config)
 	if !ok {
 		return models.Config{}, fmt.Errorf("no configuration loaded")
@@ -137,9 +146,9 @@ func (c *ConfigService) GetConfig() (models.Config, error) {
 }
 
 // Subscribe adds a new subscriber channel for config updates
-func (c *ConfigService) Subscribe() <-chan models.Config {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *Service) Subscribe() <-chan models.Config {
+	c.subscribersLock.Lock()
+	defer c.subscribersLock.Unlock()
 
 	ch := make(chan models.Config, 1)
 	c.subscribers = append(c.subscribers, ch)
@@ -147,9 +156,9 @@ func (c *ConfigService) Subscribe() <-chan models.Config {
 }
 
 // notifySubscribers sends the new configuration to all subscribers
-func (c *ConfigService) notifySubscribers(newConfig models.Config) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+func (c *Service) notifySubscribers(newConfig models.Config) {
+	c.subscribersLock.RLock()
+	defer c.subscribersLock.RUnlock()
 
 	for _, subscriber := range c.subscribers {
 		select {
@@ -160,7 +169,7 @@ func (c *ConfigService) notifySubscribers(newConfig models.Config) {
 }
 
 // StartAutoReload sets up a timer to reload the configuration automatically
-func (c *ConfigService) StartAutoReload(ctx context.Context, interval time.Duration) {
+func (c *Service) StartAutoReload(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
 		for {

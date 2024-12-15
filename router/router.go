@@ -1,27 +1,45 @@
 package router
 
 import (
+	"errors"
 	"fmt"
 	"loadbalancer/models"
+	"sync/atomic"
 )
 
-type RouterService struct {
-	config models.Config
+type Service struct {
+	config atomic.Value
 }
 
-func NewRouterService(config models.Config) *RouterService {
-	return &RouterService{config: config}
+func NewRouterService() *Service {
+	s := &Service{}
+
+	s.config.Store(models.Config{})
+
+	return s
 }
 
-func (rs *RouterService) MatchRequest(req models.Request) (string, error) {
-	for _, route := range rs.config.Routes {
+func (rs *Service) UpdateConfig(cfg models.Config) {
+	rs.config.Store(cfg)
+}
+
+var ErrRouteNotFound = errors.New("no matching route found")
+
+func (rs *Service) MatchRequest(req models.Request) (string, error) {
+	config, ok := rs.config.Load().(models.Config)
+	if !ok {
+		return "", fmt.Errorf("no configuration loaded")
+	}
+
+	for _, route := range config.Routes {
 		if route.PathPattern == req.Path &&
 			contains(route.Methods, req.Method) &&
 			matchHeaders(route.Headers, req.Headers) {
 			return route.TargetGroup, nil
 		}
 	}
-	return "", fmt.Errorf("no matching route found")
+
+	return "", ErrRouteNotFound
 }
 
 func contains(slice []string, item string) bool {
