@@ -1,0 +1,83 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "http-metrics-dashboard",
+    "title": "HTTP Metrics Dashboard",
+    "tags": ["http", "metrics", "prometheus"],
+    "timezone": "browser",
+    "version": 1,
+    "schemaVersion": 37,
+    "panels": [
+      {
+        "type": "stat",
+        "title": "Total HTTP Requests",
+        "targets": [
+          {
+            "expr": "sum(http_requests_total)",
+            "legendFormat": "Total HTTP Requests"
+          }
+        ],
+        "gridPos": {
+          "x": 0,
+          "y": 0,
+          "w": 6,
+          "h": 3
+        }
+      },
+      {
+        "type": "table",
+        "title": "HTTP Requests by Method and Status",
+        "targets": [
+          {
+            "expr": "sum(http_requests_total) by (method, status)",
+            "legendFormat": "{{method}} {{status}}"
+          }
+        ],
+        "gridPos": {
+          "x": 6,
+          "y": 0,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "graph",
+        "title": "HTTP Request Duration",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "95th Percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "50th Percentile"
+          }
+        ],
+        "gridPos": {
+          "x": 0,
+          "y": 3,
+          "w": 24,
+          "h": 9
+        }
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "job",
+          "type": "query",
+          "datasource": null,
+          "query": "label_values(http_requests_total, job)",
+          "label": "Job",
+          "multi": true,
+          "includeAll": true,
+          "allValue": ".*",
+          "current": {
+            "text": "All",
+            "value": ".*"
+          }
+        }
+      ]
+    }
+  }
+}

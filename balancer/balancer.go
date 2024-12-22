@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"loadbalancer/models"
 	"loadbalancer/router"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/http/httputil"
@@ -27,6 +28,10 @@ type ConfigService interface {
 	Subscribe() <-chan models.Config
 }
 
+type MetricsWrapper interface {
+	WrapHandlerForProxy(proxy string, addr string, handler http.Handler) http.Handler
+}
+
 type LoadBalancer struct {
 	config          models.Config
 	configLock      sync.RWMutex
@@ -39,14 +44,16 @@ type LoadBalancer struct {
 	circuitBreaker  CircuitBreaker
 	router          Router
 	configService   ConfigService
+	metricsWrapper  MetricsWrapper
 	parentCtx       context.Context
 }
 
-func NewLoadBalancer(ctx context.Context, cb CircuitBreaker, rt Router, cs ConfigService) *LoadBalancer {
+func NewLoadBalancer(ctx context.Context, cb CircuitBreaker, rt Router, cs ConfigService, metricsWrapper MetricsWrapper) *LoadBalancer {
 	lb := &LoadBalancer{
 		circuitBreaker: cb,
 		router:         rt,
 		configService:  cs,
+		metricsWrapper: metricsWrapper,
 		parentCtx:      ctx,
 		proxies:        make(map[string][]*Proxy),
 	}
@@ -228,7 +235,8 @@ func (lb *LoadBalancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	lb.reqCountLock.Unlock()
 
-	p.ServeHTTP(w, r)
+	wrappedHandler := lb.metricsWrapper.WrapHandlerForProxy(p.id, p.addr.String(), p)
+	wrappedHandler.ServeHTTP(w, r)
 }
 
 // Implementations of each algorithm
@@ -272,6 +280,10 @@ func ApplyLeastConnection(servers []*Proxy, lastProxyID string, reqCount int) (*
 		if leastConnectedPeer.GetLoad() > b.GetLoad() {
 			leastConnectedPeer = b
 		}
+	}
+
+	if leastConnectedPeer == nil {
+		return nil, ""
 	}
 
 	return leastConnectedPeer, leastConnectedPeer.id
@@ -322,12 +334,14 @@ func NewProxy(name string, addr *url.URL, weight int) *Proxy {
 		id:     name,
 		proxy:  httputil.NewSingleHostReverseProxy(addr),
 		weight: weight,
+		addr:   addr,
 	}
 }
 
 // Proxy is a simple http proxy entity
 type Proxy struct {
 	id      string
+	addr    *url.URL
 	proxy   *httputil.ReverseProxy
 	isAlive bool
 	load    int32
@@ -337,8 +351,17 @@ type Proxy struct {
 // ServeHTTP proxies incoming requests
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt32(&p.load, 1)
-	defer atomic.AddInt32(&p.load, -1)
+	defer func() {
+		atomic.AddInt32(&p.load, -1)
+		log.Printf("request %s was handled by server %s (%s), current load: %d",
+			r.URL.String(), p.id, p.addr, p.GetLoad())
+	}()
+
+	log.Printf("request %s will be forwarded to server %s (%s), current load: %d",
+		r.URL.String(), p.id, p.addr, p.GetLoad())
+
 	p.proxy.ServeHTTP(w, r)
+
 }
 
 // GetLoad returns the number of requests being served by the proxy at the moment

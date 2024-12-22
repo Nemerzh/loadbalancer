@@ -1,0 +1,19 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Go App Metrics",
+    "panels": [
+      {
+        "type": "graph",
+        "title": "HTTP Requests Total",
+        "targets": [
+          {
+            "expr": "http_requests_total",
+            "legendFormat": "{{method}} {{path}} {{status}}"
+          }
+        ]
+      }
+    ]
+  },
+  "overwrite": true
+}

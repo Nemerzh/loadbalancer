@@ -13,30 +13,11 @@ func (a Algorithm) String() string {
 }
 
 const (
-	RoundRobin      Algorithm = "round_robin"
-	LeastConnection Algorithm = "least_connection"
-	Weighted        Algorithm = "weighted"
+	RoundRobin      Algorithm = "ROUND_ROBIN"
+	LeastConnection Algorithm = "LEAST_CONNECTIONS"
+	Weighted        Algorithm = "WEIGHTED"
 	Random          Algorithm = "random"
 )
-
-func (s Server) GetBaseURL() *url.URL {
-	baseURL := url.URL{
-		Scheme: s.Scheme,
-		Host:   fmt.Sprintf("%s:%d", s.Host, s.Port),
-	}
-
-	return &baseURL
-}
-
-func (s Server) GetFullHealthCheck() string {
-	healthCheckURL := url.URL{
-		Scheme: s.Scheme,
-		Host:   fmt.Sprintf("%s:%d", s.Host, s.Port),
-		Path:   strings.TrimSuffix(s.HealthCheck, "/"),
-	}
-
-	return healthCheckURL.String()
-}
 
 type Config struct {
 	Balancing    BalancerConfig `json:"balancing"`
@@ -70,6 +51,25 @@ type Server struct {
 	Weight      int    `json:"weight"`
 	Available   bool   `json:"available"`
 	HealthCheck string `json:"health_check"`
+}
+
+func (s Server) GetBaseURL() *url.URL {
+	baseURL := url.URL{
+		Scheme: s.Scheme,
+		Host:   fmt.Sprintf("%s:%d", s.Host, s.Port),
+	}
+
+	return &baseURL
+}
+
+func (s Server) GetFullHealthCheck() string {
+	healthCheckURL := url.URL{
+		Scheme: s.Scheme,
+		Host:   fmt.Sprintf("%s:%d", s.Host, s.Port),
+		Path:   strings.TrimSuffix(s.HealthCheck, "/"),
+	}
+
+	return healthCheckURL.String()
 }
 
 type Request struct {

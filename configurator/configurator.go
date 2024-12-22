@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"loadbalancer/models"
+	"log"
 	"net/http"
 	"net/url"
 	"sync"
@@ -34,8 +35,8 @@ func NewService(apiURL url.URL) *Service {
 	return service
 }
 
-// LoadConfig fetches the configuration from the API
-func (c *Service) LoadConfig(ctx context.Context) (models.Config, error) {
+// loadConfigFromAPI fetches the configuration from the API
+func (c *Service) loadConfigFromAPI(ctx context.Context) (models.Config, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.apiURL.String(), nil)
 	if err != nil {
 		return models.Config{}, err
@@ -53,7 +54,7 @@ func (c *Service) LoadConfig(ctx context.Context) (models.Config, error) {
 	}
 
 	var cfg models.Config
-	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
 		return models.Config{}, err
 	}
 
@@ -120,12 +121,13 @@ func (c *Service) ValidateConfig(cfg models.Config) error {
 }
 
 // ReloadConfig fetches, validates, and updates the configuration
-func (c *Service) ReloadConfig(ctx context.Context) error {
-	newConfig, err := c.LoadConfig(ctx)
+func (c *Service) LoadConfig(ctx context.Context) error {
+	newConfig, err := c.loadConfigFromAPI(ctx)
 	if err != nil {
 		// Log or handle invalid config without updating
 		return err
 	}
+
 	if err = c.ValidateConfig(newConfig); err != nil {
 		// Log or handle invalid config without updating
 		return err
@@ -133,6 +135,9 @@ func (c *Service) ReloadConfig(ctx context.Context) error {
 
 	c.config.Store(newConfig)
 	c.notifySubscribers(newConfig)
+
+	log.Println("Config has been reloaded successfully")
+
 	return nil
 }
 
@@ -175,11 +180,13 @@ func (c *Service) StartAutoReload(ctx context.Context, interval time.Duration) {
 		for {
 			select {
 			case <-ticker.C:
-				err := c.ReloadConfig(ctx)
+				err := c.LoadConfig(ctx)
 				if err != nil {
-					fmt.Println("Error reloading config:", err)
+					log.Println("Error reloading config:", err)
 					continue
 				}
+
+				log.Println("Config has been reloaded successfully")
 			case <-ctx.Done():
 				ticker.Stop()
 				return

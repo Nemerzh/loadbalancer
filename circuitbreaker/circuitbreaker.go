@@ -30,9 +30,10 @@ type CircuitBreaker struct {
 	availableServersLock sync.RWMutex
 	parentCtx            context.Context
 	client               *http.Client
+	healthCheckPeriod    time.Duration
 }
 
-func NewCircuitBreaker(ctx context.Context, configService ConfigService) *CircuitBreaker {
+func NewCircuitBreaker(ctx context.Context, configService ConfigService, healthCheckPeriod time.Duration) *CircuitBreaker {
 	cb := &CircuitBreaker{
 		config:           models.Config{},
 		configService:    configService,
@@ -41,6 +42,7 @@ func NewCircuitBreaker(ctx context.Context, configService ConfigService) *Circui
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		healthCheckPeriod: healthCheckPeriod,
 	}
 
 	go cb.runHealthCheck(ctx)
@@ -92,13 +94,17 @@ func (cb *CircuitBreaker) reloadConfig(ctx context.Context) {
 
 func (cb *CircuitBreaker) getServerState(serverHealthcheck string) serverState {
 	err := cb.defaultHealthCheck(serverHealthcheck)
-	log.Printf("got err %+v for %s ", err, serverHealthcheck)
 
-	return serverState{
+	s := serverState{
 		isAlive:   err == nil,
 		err:       err,
 		checkedAt: time.Now(),
 	}
+
+	/*log.Printf("[%s] checking health check for %s: isAlive: %t",
+	s.checkedAt.Format(time.RFC3339Nano), serverHealthcheck, s.isAlive)*/
+
+	return s
 }
 
 func (cb *CircuitBreaker) CheckServers(groups []models.TargetGroup) map[string]serverState {
@@ -117,7 +123,7 @@ func (cb *CircuitBreaker) CheckServers(groups []models.TargetGroup) map[string]s
 }
 
 func (cb *CircuitBreaker) runHealthCheck(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(cb.healthCheckPeriod)
 	defer ticker.Stop()
 
 	for {
@@ -125,6 +131,7 @@ func (cb *CircuitBreaker) runHealthCheck(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			log.Printf("Run healthchecks")
 			cb.configLock.RLock()
 			groups := cb.config.TargetGroups
 			cb.configLock.RUnlock()
